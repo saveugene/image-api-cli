@@ -7,6 +7,6 @@ do
         if [ "$GOOS" == "darwin" ] && [ "$GOARCH" == "386" ]; then
             continue
         fi
-        GOOS=$GOOS GOARCH=$GOARCH go build -o bin/$base_name-$GOOS\_$GOARCH main.go
+        GOOS=$GOOS GOARCH=$GOARCH go build -o bin/$base_name-$GOOS\_$GOARCH ./src/main.go
     done
 done
