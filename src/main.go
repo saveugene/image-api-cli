@@ -89,10 +89,37 @@ func pipelineProcessor(url string, pipeline []string, sample map[string]interfac
 	return sample
 }
 
+func getValueBySelector(data interface{}, selector string) interface{} {
+	keys := strings.Split(selector, ".")
+	for _, key := range keys {
+		if index, err := strconv.Atoi(key); err == nil {
+			if list, ok := data.([]interface{}); ok && index >= 0 && index < len(list) {
+				data = list[index]
+			} else {
+				return nil
+			}
+		} else {
+			if obj, ok := data.(map[string]interface{}); ok {
+				if value, exists := obj[key]; exists {
+					data = value
+				} else {
+					return nil
+				}
+			} else {
+				return nil
+			}
+		}
+	}
+	return data
+}
+
 func main() {
+	selector := ""
 	if len(os.Args) < 5 {
-		fmt.Println("Usage: go run main.go <url> <imagePath> <serviceName> <version>")
+		fmt.Println("Usage: go run main.go <url> <imagePath> <serviceName> <version> <selector | nil>")
 		return
+	} else if len(os.Args) == 6 {
+		selector = os.Args[5]
 	}
 
 	url := os.Args[1]
@@ -119,6 +146,11 @@ func main() {
 	}
 
 	outSample := pipelineProcessor(url, pipeline, sample, version)
-	jsonSample, _ := json.Marshal(outSample)
+	var jsonSample []byte
+	if selector != "" {
+		jsonSample, _ = json.Marshal(getValueBySelector(outSample, selector))
+	} else {
+		jsonSample, _ = json.Marshal(outSample)
+	}
 	fmt.Println(string(jsonSample))
 }

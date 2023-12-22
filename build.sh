@@ -1,4 +1,4 @@
-base_name=image-api-cli
+base_name=image-api
 
 for GOOS in darwin windows linux
 do
