@@ -17,29 +17,30 @@ import (
 
 type ProcessingResult struct {
 	Duration time.Duration
+	Name     string
 	Sample   map[string]interface{}
 }
 
-func processSample(url string, sample interface{}, wg *sync.WaitGroup, resultCh chan ProcessingResult) {
+func processSample(url string, svcName string, apiVersion string, sample interface{}, wg *sync.WaitGroup, resultCh chan ProcessingResult) {
 	defer wg.Done()
 	jsonData, _ := json.Marshal(sample)
 	start := time.Now()
-	resp, _ := http.Post(url, "application/json", bytes.NewReader(jsonData))
+	resp, _ := http.Post(fmt.Sprintf("%s/%s/v%s/process/sample", url, svcName, apiVersion), "application/json", bytes.NewReader(jsonData))
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	duration := time.Since(start)
 	var data map[string]interface{}
 	json.Unmarshal(body, &data)
-	resultCh <- ProcessingResult{Sample: data, Duration: duration}
+	resultCh <- ProcessingResult{Sample: data, Duration: duration, Name: svcName}
 }
 
-func executePool(url string, pool []string, sample map[string]interface{}, version string) []ProcessingResult {
+func executeProcessingPool(url string, apiVersion string, pool []string, sample map[string]interface{}) []ProcessingResult {
 	var wg sync.WaitGroup
 	resultCh := make(chan ProcessingResult, len(pool))
 	defer close(resultCh)
 	for _, svcName := range pool {
 		wg.Add(1)
-		go processSample(fmt.Sprintf("%s/%s/v%s/process/sample", url, svcName, version), sample, &wg, resultCh)
+		go processSample(url, svcName, apiVersion, sample, &wg, resultCh)
 	}
 	wg.Wait()
 
@@ -50,7 +51,11 @@ func executePool(url string, pool []string, sample map[string]interface{}, versi
 	return resExecPool
 }
 
-func pipelineProcessor(url string, pipeline []string, sample map[string]interface{}, version string) map[string]interface{} {
+func addDurationFromProcessing(durations [][2]string, procResult ProcessingResult) [][2]string {
+	return append(durations, [2]string{procResult.Name, procResult.Duration.String()})
+}
+
+func pipelineProcessor(url string, pipeline []string, sample map[string]interface{}, apiVersion string) (map[string]interface{}, [][2]string) {
 
 	var keys []string
 	var poolPipeline [][]string
@@ -74,19 +79,23 @@ func pipelineProcessor(url string, pipeline []string, sample map[string]interfac
 		services := groupedSvcsMap[key]
 		poolPipeline = append(poolPipeline, services)
 	}
+	var durations [][2]string
 
 	for _, pool := range poolPipeline {
-		procResults := executePool(url, pool, sample, version)
+		procResults := executeProcessingPool(url, apiVersion, pool, sample)
 		sample = procResults[0].Sample
-		for i := 1; i < len(procResults); i++ {
-			for i, v := range procResults[i].Sample["objects"].([]interface{}) {
-				sample["objects"].([]interface{})[i] = v
+		durations = addDurationFromProcessing(durations, procResults[0])
+		for si := 1; si < len(procResults); si++ {
+			durations = addDurationFromProcessing(durations, procResults[si])
+			for iObj, obj := range procResults[si].Sample["objects"].([]interface{}) {
+				for objField, val := range obj.(map[string]interface{}) {
+					var objects = sample["objects"].([]interface{})
+					objects[iObj].(map[string]interface{})[objField] = val
+				}
 			}
 		}
-
 	}
-
-	return sample
+	return sample, durations
 }
 
 func getValueBySelector(data interface{}, selector string) interface{} {
@@ -113,10 +122,15 @@ func getValueBySelector(data interface{}, selector string) interface{} {
 	return data
 }
 
+func envToBool(key string) bool {
+	val := strings.ToLower(os.Getenv(key))
+	return val == "true" || val == "1"
+}
+
 func main() {
 	selector := ""
 	if len(os.Args) < 5 {
-		fmt.Println("Usage: go run main.go <url> <imagePath> <serviceName> <version> <selector | nil>")
+		fmt.Println("Usage: image-api <url> <imagePath> <pipelineStr> <apiVersion> <selector | nil>")
 		return
 	} else if len(os.Args) == 6 {
 		selector = os.Args[5]
@@ -125,18 +139,20 @@ func main() {
 	url := os.Args[1]
 	imagePath := os.Args[2]
 	pipelineStr := os.Args[3]
-	version := os.Args[4]
+	apiVersion := os.Args[4]
+
+	enableProcTime := envToBool("ENABLE_PROCESSING_DURATION_TRACER")
 
 	imageBytes, _ := os.ReadFile(imagePath)
 	pipeline := strings.Split(pipelineStr, ",")
 
 	encodedImage := base64.StdEncoding.EncodeToString(imageBytes)
 	var sample map[string]interface{}
-	if version == "1" {
+	if apiVersion == "1" {
 		sample = map[string]interface{}{
 			"$image": encodedImage,
 		}
-	} else if version == "2" {
+	} else if apiVersion == "2" {
 		sample = map[string]interface{}{
 			"_image": map[string]interface{}{
 				"blob":   encodedImage,
@@ -145,12 +161,16 @@ func main() {
 		}
 	}
 
-	outSample := pipelineProcessor(url, pipeline, sample, version)
+	outSample, durations := pipelineProcessor(url, pipeline, sample, apiVersion)
+	if enableProcTime {
+		outSample["durations"] = durations
+	}
 	var jsonSample []byte
 	if selector != "" {
 		jsonSample, _ = json.Marshal(getValueBySelector(outSample, selector))
 	} else {
 		jsonSample, _ = json.Marshal(outSample)
 	}
+
 	fmt.Println(string(jsonSample))
 }
